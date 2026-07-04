@@ -43,6 +43,7 @@ All secrets come from a Bitwarden vault, never from local files or plaintext env
 | `arm-vm-ssh-key` | notes = SSH private key; field `public_key` |
 | `arm-vm-oci-api-key` | notes = OCI API private key (PEM); fields `user_ocid`, `fingerprint`, `tenancy_ocid`, `region` |
 | `arm-vm-postgres` | fields `domain`, `pgadmin_domain`, `pg_superuser(_password)`, `app_user(_password)`, `pgadmin_web_email/password` |
+| `arm-vm-redis` | fields `redisinsight_domain`, `redis_password`, `redisinsight_web_user/password`, `letsencrypt_email` |
 
 Any field can be bypassed with the matching env var (`SSH_KEY=`, `OCI_CLI_USER=`/`OCI_CLI_KEY_FILE=`/…, `DOMAIN=`, `PG_SUPERUSER_PASSWORD=`, …) if Bitwarden is unavailable — the scripts only touch the vault for whatever wasn't already supplied. Details in [oci-infra/README.md § Secrets](oci-infra/README.md#secrets).
 
@@ -66,6 +67,11 @@ cp .env.example .env      # then edit
 
 # Install / reconfigure PostgreSQL + pgAdmin4 (both served on 443 via nginx SNI)
 ./oci-infra/setup-postgres.sh
+
+# Install / reconfigure loopback-only Redis + Redis Insight
+bash ./oci-infra/setup-redis.sh
+# Windows PowerShell:
+# & "C:\Program Files\Git\bin\bash.exe" ./oci-infra/setup-redis.sh
 
 # (Re)apply just the Cloudflare origin lock on 80/443
 ./oci-infra/cloudflare-lock.sh

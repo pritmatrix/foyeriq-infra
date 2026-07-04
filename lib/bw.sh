@@ -19,6 +19,9 @@
 #   arm-vm-postgres      fields domain, pgadmin_domain, pg_superuser,
 #                        pg_superuser_password, app_user, app_user_password,
 #                        pgadmin_web_email, pgadmin_web_password
+#   arm-vm-redis         fields redisinsight_domain, redis_password,
+#                        redisinsight_web_user, redisinsight_web_password,
+#                        letsencrypt_email
 
 bw_require_session() {
   command -v bw >/dev/null || { echo "Bitwarden CLI (bw) not found. Install it: brew install bitwarden-cli" >&2; exit 1; }

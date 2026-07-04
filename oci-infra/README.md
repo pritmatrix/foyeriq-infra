@@ -37,6 +37,7 @@ export BW_SESSION=$(bw unlock --raw)   # once per shell/session
 | `arm-vm-ssh-key` | notes = SSH private key; field `public_key` |
 | `arm-vm-oci-api-key` | notes = OCI API private key (PEM); fields `user_ocid`, `fingerprint`, `tenancy_ocid`, `region` |
 | `arm-vm-postgres` | fields `domain`, `pgadmin_domain`, `pg_superuser`, `pg_superuser_password`, `app_user`, `app_user_password`, `pgadmin_web_email`, `pgadmin_web_password` |
+| `arm-vm-redis` | fields `redisinsight_domain`, `redis_password`, `redisinsight_web_user`, `redisinsight_web_password`, `letsencrypt_email` |
 
 Any of these can be bypassed per-field with the matching env var (`SSH_KEY=`, `OCI_CLI_USER=`/`OCI_CLI_FINGERPRINT=`/`OCI_CLI_TENANCY=`/`OCI_CLI_REGION=`/`OCI_CLI_KEY_FILE=`, `DOMAIN=`, `PG_SUPERUSER_PASSWORD=`, etc.) if Bitwarden is unavailable — the scripts only touch the vault for whatever wasn't already supplied that way.
 
@@ -65,6 +66,48 @@ cp .env.example .env
 `setup.sh` creates the volume and attachment via the OCI API (idempotent — looks up by display name first) if they don't already exist, then over SSH formats it ext4 on first run and adds a UUID-keyed `/etc/fstab` entry (`nofail`, so a detached/missing disk won't block boot). Re-running is a no-op if everything's already in place.
 
 `setup-postgres.sh` relocates Postgres's data directory onto this volume (`/mnt/data/postgresql/<version>/main`) the first time it runs, so the database isn't constrained by the 50GB boot disk — stops Postgres, `rsync`s the data directory over, repoints `data_directory` in `postgresql.conf`, and renames the old location to `<path>.bak` (kept as a safety net, not deleted). Re-running is a no-op once the data directory is already under `/mnt/data`.
+
+## Redis + Redis Insight
+
+Create a proxied Cloudflare A record for `redis.foyeriq.in` pointing to the VM,
+then create a Bitwarden item named `arm-vm-redis` with these custom fields:
+
+| Field | Purpose |
+|---|---|
+| `redisinsight_domain` | Public Redis Insight hostname, for example `redis.foyeriq.in` |
+| `redis_password` | Password required by Redis applications and Redis Insight |
+| `redisinsight_web_user` | Nginx Basic Auth username for the public UI |
+| `redisinsight_web_password` | Nginx Basic Auth password for the public UI |
+| `letsencrypt_email` | Email used for the Redis Insight TLS certificate |
+
+Run:
+
+```bash
+export BW_SESSION=$(bw unlock --raw)
+bash ./oci-infra/setup-redis.sh
+```
+
+From Windows PowerShell, invoke Git Bash explicitly (the plain `bash` command
+may resolve to WSL):
+
+```powershell
+$env:BW_SESSION = bw unlock --raw
+& "C:\Program Files\Git\bin\bash.exe" ./oci-infra/setup-redis.sh
+```
+
+The block volume from `setup.sh` must be mounted at `/mnt/data`. Redis listens
+only on `127.0.0.1:6379`, requires authentication, and persists an AOF under
+`/mnt/data/redis`; neither OCI nor iptables exposes 6379. Same-VM applications
+connect with:
+
+```text
+redis://default:<redis_password>@127.0.0.1:6379
+```
+
+Redis Insight is available at `https://redis.foyeriq.in`. Authenticate with the
+`redisinsight_web_*` credentials, then add the database using host `127.0.0.1`,
+port `6379`, username `default`, and `redis_password`. Its state is persisted
+in the `redisinsight-data` Docker volume.
 
 ## Postgres + pgAdmin4, both on 443
 
