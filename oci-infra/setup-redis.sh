@@ -125,6 +125,11 @@ if [[ -z "${OCI_CLI_USER:-}" ]]; then
   export OCI_CLI_TENANCY="$(bw_field "$BW_ITEM_OCI_KEY" tenancy_ocid)"
   export OCI_CLI_REGION="$(bw_field "$BW_ITEM_OCI_KEY" region)"
   export OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING=True
+else
+  [[ -n "${OCI_CLI_KEY_FILE:-}" && -f "$OCI_CLI_KEY_FILE" ]] || {
+    echo "OCI_CLI_KEY_FILE not set or not found (required when OCI_CLI_USER is supplied directly)." >&2
+    exit 1
+  }
 fi
 COMPARTMENT_ID="$OCI_CLI_TENANCY"
 
@@ -203,14 +208,14 @@ ssh_run '
   redis-server --version
 '
 
-# Base64 keeps punctuation in the password from being interpreted by the
-# local/remote shell. The decoded password is escaped for Redis's quoted config
-# syntax and written to a root-owned file readable only by the redis group.
-REDIS_PASSWORD_B64="$(printf '%s' "$REDIS_PASSWORD" | base64 | tr -d '\r\n')"
+# The password is piped over stdin (not interpolated into the command string)
+# so it never appears in `ps`/`/proc/<pid>/cmdline` on either the local or
+# remote machine. It's then escaped for Redis's quoted config syntax and
+# written to a root-owned file readable only by the redis group.
 echo "==> Configuring Redis: loopback only, password required, AOF on $DATA_MOUNT_POINT"
-ssh_run "
+printf '%s' "$REDIS_PASSWORD" | ssh_run "
   set -euo pipefail
-  REDIS_PASSWORD=\$(printf '%s' '$REDIS_PASSWORD_B64' | base64 -d)
+  REDIS_PASSWORD=\$(cat)
   REDIS_PASSWORD_ESCAPED=\${REDIS_PASSWORD//\\\\/\\\\\\\\}
   REDIS_PASSWORD_ESCAPED=\${REDIS_PASSWORD_ESCAPED//\\\"/\\\\\\\"}
 
@@ -232,7 +237,14 @@ ssh_run "
 
   sudo systemctl enable redis-server >/dev/null
   sudo systemctl restart redis-server
-  REDISCLI_AUTH=\"\$REDIS_PASSWORD\" redis-cli -h 127.0.0.1 ping | grep -qx PONG
+  for i in \$(seq 1 15); do
+    REDISCLI_AUTH=\"\$REDIS_PASSWORD\" redis-cli -h 127.0.0.1 ping 2>/dev/null | grep -qx PONG && break
+    if [[ \$i -eq 15 ]]; then
+      echo 'Redis did not respond PONG within 15s of restart (still loading AOF?).' >&2
+      exit 1
+    fi
+    sleep 1
+  done
   if ss -ltnH '( sport = :6379 )' | awk '{print \$4}' | grep -qvE '^(127\\.0\\.0\\.1|\\[::1\\]):6379$'; then
     echo 'Redis is listening on a non-loopback address; refusing to continue.' >&2
     exit 1
@@ -241,16 +253,16 @@ ssh_run "
 echo "    ok"
 
 echo "==> Ensuring Docker, nginx, certbot, and Basic Auth tooling are installed"
-ssh_run '
+ssh_run "
   set -e
   if ! command -v docker >/dev/null; then
     curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
     sudo sh /tmp/get-docker.sh
     rm -f /tmp/get-docker.sh
-    sudo usermod -aG docker ubuntu
+    sudo usermod -aG docker '$VM_USER'
   fi
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx certbot apache2-utils
-'
+"
 
 echo "==> Requesting/renewing the TLS certificate for $REDISINSIGHT_DOMAIN"
 echo "    The Cloudflare DNS record must already be proxied to $VM_IP."
@@ -276,11 +288,10 @@ ssh_run '
 '
 echo "    ok"
 
-REDISINSIGHT_WEB_PASSWORD_B64="$(printf '%s' "$REDISINSIGHT_WEB_PASSWORD" | base64 | tr -d '\r\n')"
 echo "==> Configuring Nginx TLS reverse proxy and Basic Auth for Redis Insight"
-ssh_run "
+printf '%s' "$REDISINSIGHT_WEB_PASSWORD" | ssh_run "
   set -euo pipefail
-  WEB_PASSWORD=\$(printf '%s' '$REDISINSIGHT_WEB_PASSWORD_B64' | base64 -d)
+  WEB_PASSWORD=\$(cat)
   printf '%s\\n' \"\$WEB_PASSWORD\" \
     | sudo htpasswd -i -c -B /etc/nginx/.redisinsight.htpasswd '$REDISINSIGHT_WEB_USER' >/dev/null
   sudo chown root:www-data /etc/nginx/.redisinsight.htpasswd
@@ -320,12 +331,20 @@ CONF
 "
 
 echo "==> Ensuring Nginx stream SNI dispatch is present on public port 443"
+# Written unconditionally (not guarded by a file-existence check) so this
+# always self-heals to the same include-form dispatch.conf that
+# setup-postgres.sh and apps/site/deploy.sh also write byte-for-byte
+# identically — whichever of these scripts runs last wins, but since all
+# three emit the same content, the result is always the correct, extensible
+# form. A guarded/conditional write here previously caused this script's
+# sni.d-aware template to be silently skipped whenever setup-postgres.sh had
+# already created an older, non-sni.d dispatch.conf first.
 ssh_run '
   set -e
+  sudo mkdir -p /etc/nginx/stream.d/sni.d
   grep -q "include /etc/nginx/stream.d/\*.conf;" /etc/nginx/nginx.conf || \
     sudo sed -i "/^http {/i stream {\n    include /etc/nginx/stream.d/*.conf;\n}\n" /etc/nginx/nginx.conf
-  if [[ ! -f /etc/nginx/stream.d/dispatch.conf ]]; then
-    sudo tee /etc/nginx/stream.d/dispatch.conf >/dev/null <<'"'"'CONF'"'"'
+  sudo tee /etc/nginx/stream.d/dispatch.conf >/dev/null <<'"'"'CONF'"'"'
 map $ssl_preread_server_name $backend {
     include /etc/nginx/stream.d/sni.d/*.conf;
     default 127.0.0.1:5432;
@@ -336,7 +355,6 @@ server {
     proxy_pass $backend;
 }
 CONF
-  fi
   sudo nginx -t
   sudo systemctl enable --now nginx
   sudo systemctl reload nginx
