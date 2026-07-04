@@ -2,10 +2,15 @@
 # First-boot configuration for an OCI Ampere A1 instance.
 #
 # Runs ONCE when the VM is created. Goals:
-#   1. Open iptables for HTTP (80) and HTTPS (443) ingress.
-#      OCI Ubuntu images ship with a REJECT rule near the top of INPUT,
-#      so we PREPEND our ACCEPT rules (no position number) to guarantee
-#      they evaluate first.
+#   1. Lock iptables so HTTP (80) and HTTPS (443) ingress only accept
+#      Cloudflare's origin IP ranges — this VM is Cloudflare-proxied, so the
+#      origin should never be reachable by bypassing Cloudflare. OCI Ubuntu
+#      images ship a REJECT rule near the top of INPUT, so the allowlist jump
+#      is PREPENDED (position 1) to evaluate first; SSH (22) is left open.
+#      This mirrors setup.sh / cf-lock-iptables.sh, minus the weekly refresh
+#      timer that setup.sh installs — here the ranges are just applied once at
+#      first boot (re-run setup.sh, or oci-infra/cloudflare-lock.sh, to add the
+#      timer and to refresh the ranges later).
 #   2. Install Docker Engine + the official compose plugin.
 #   3. Add the default `ubuntu` user to the `docker` group so it can run
 #      `docker ...` without sudo.
@@ -26,8 +31,17 @@ packages:
   - iptables-persistent
 
 runcmd:
-  - iptables -I INPUT -p tcp --dport 80 -m state --state NEW -j ACCEPT
-  - iptables -I INPUT -p tcp --dport 443 -m state --state NEW -j ACCEPT
+  # Allow inbound 80/443 from Cloudflare's ranges only (everything else falls
+  # through CF_ALLOW's trailing DROP). Aborts without touching the firewall if
+  # the range list can't be fetched or looks wrong.
+  - |
+    set -e
+    CF=$(curl -fsS --retry 3 --max-time 20 https://www.cloudflare.com/ips-v4)
+    echo "$CF" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$'
+    iptables -N CF_ALLOW
+    for c in $CF; do iptables -A CF_ALLOW -s "$c" -j ACCEPT; done
+    iptables -A CF_ALLOW -j DROP
+    iptables -I INPUT 1 -p tcp -m multiport --dports 80,443 -m conntrack --ctstate NEW -j CF_ALLOW
   - netfilter-persistent save
   - curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
   - sh /tmp/get-docker.sh

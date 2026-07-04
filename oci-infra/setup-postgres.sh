@@ -29,14 +29,13 @@
 # timer renews it unattended; deploy hooks reload nginx and refresh
 # Postgres's copy of the cert + restart it so the renewed cert takes effect.
 #
-# Because port 443 accepts connections from anywhere (there's no IP
-# allowlist — Postgres can't even see real client IPs, since everything
-# arrives from nginx as 127.0.0.1), this script also applies a hardening
-# pass: the Postgres SUPERUSER role is confined to local/SSH access only
-# (never reachable over the network); a separate, unprivileged app role is
-# what external clients and pgAdmin4 actually use; connection attempts on
-# 443 are rate-limited per source IP at the firewall (a fail2ban-style log
-# jail isn't feasible here since Postgres never sees the real client IP);
+# The VM is Cloudflare-proxied, so this also locks the web ports (80/443) to
+# Cloudflare's origin IP ranges (see lib/firewall.sh) — nobody can bypass
+# Cloudflare by hitting the origin directly, and as a side effect Postgres is
+# no longer reachable on 443 from arbitrary clients (use an SSH tunnel; see the
+# closing notes). On top of that a hardening pass: the Postgres SUPERUSER role
+# is confined to local/SSH access only (never reachable over the network); a
+# separate, unprivileged app role is what pgAdmin4 and tunneled clients use;
 # statement/idle timeouts bound abuse from a compromised credential;
 # connection/disconnection logging is on; TLS is pinned to 1.2+; and OS +
 # Postgres security patches install unattended.
@@ -76,6 +75,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$REPO_ROOT/lib/env.sh"
 source "$REPO_ROOT/lib/bw.sh"
+source "$REPO_ROOT/lib/firewall.sh"
 load_env "$REPO_ROOT"
 
 VM_USER="${VM_USER:-ubuntu}"
@@ -305,16 +305,11 @@ ssh_run '
 '
 echo "    ok"
 
-echo "==> Rate-limiting new connections on 443 per source IP (mitigates brute-force/scanning)"
-echo "    (a log-based fail2ban jail isn't viable: Postgres only ever sees 127.0.0.1 as the client,"
-echo "     since all traffic arrives via the local nginx proxy — so this is IP-rate-limiting at the"
-echo "     firewall instead, before nginx ever sees the connection)"
-ssh_run '
-  sudo iptables -C INPUT -p tcp --dport 443 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 20/min --hashlimit-burst 30 --hashlimit-mode srcip --hashlimit-name conn443 -j DROP 2>/dev/null || \
-    sudo iptables -I INPUT -p tcp --dport 443 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 20/min --hashlimit-burst 30 --hashlimit-mode srcip --hashlimit-name conn443 -j DROP
-  sudo netfilter-persistent save
-'
-echo "    ok"
+# Lock 80/443 to Cloudflare's origin ranges (and drop the old per-source-IP
+# hashlimit, which is counterproductive behind Cloudflare — "source IP" would
+# be a shared Cloudflare edge). Rate-limiting/DDoS protection is Cloudflare's
+# job now; this just ensures nobody reaches the origin except via Cloudflare.
+apply_cloudflare_lock "$SCRIPT_DIR/cf-lock-iptables.sh"
 
 echo "==> Enabling unattended security upgrades (OS + PGDG Postgres packages)"
 ssh_run "
@@ -420,9 +415,11 @@ ssh_run "
 echo "    ok"
 
 echo
-echo "==> Done. Connect to Postgres from anywhere with the unprivileged app role:"
-echo "    psql \"host=$DOMAIN port=443 dbname=postgres user=$APP_USER sslmode=require\""
-echo "    (works with both classic sslmode=require and, on libpq 17+, sslnegotiation=direct)"
+echo "==> Done. The origin's web ports (80/443) now accept Cloudflare ranges only,"
+echo "    so Postgres is no longer reachable on 443 directly. Connect via an SSH tunnel"
+echo "    with the unprivileged app role:"
+echo "    ../ssh/connect.sh -L 5432:127.0.0.1:5432"
+echo "    psql \"host=127.0.0.1 port=5432 dbname=postgres user=$APP_USER sslmode=require\""
 echo
 echo "==> For true superuser/admin work:"
 echo "    ../ssh/connect.sh"

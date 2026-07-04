@@ -26,10 +26,13 @@ Pass a command to run it remotely instead of opening a shell:
 
 ## Load-gen service
 
-`load-gen.sh` manages the continuous ~30% CPU load-gen service on arm-vm, which keeps the Always Free A1 instance from looking idle to Oracle.
+`load-gen.sh` manages the keep-alive load-gen service on arm-vm — a `stress-ng` unit ([`load-gen.service`](load-gen.service)) that holds **~30% CPU + ~6 GB RAM** so Oracle doesn't reclaim the Always Free A1 instance as idle.
 
 ```bash
+./ssh/load-gen.sh install                 # (re)install the service from load-gen.service, then start it
 ./ssh/load-gen.sh {status|start|stop|logs}
 ```
 
 Uses the same `SSH_KEY` override as `connect.sh`.
+
+**Why both CPU and memory:** Oracle only reclaims an instance if, over a 7-day window, its 95th-percentile **CPU, network, and memory are _all_ under 20%** — so sustained CPU alone is enough. The memory hold is an independent second guardian in case the CPU stressor dies (on the 23 GB box it lands ~28%). Network is deliberately not generated: hitting 20% of the vNIC would mean ~800 Mbps sustained and risks the 10 TB free egress cap, and the AND-logic means it's never needed. Rationale lives in the comments of [`load-gen.service`](load-gen.service).

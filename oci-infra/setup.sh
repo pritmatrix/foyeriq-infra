@@ -10,10 +10,10 @@
 #      alone isn't enough, since OCI drops disallowed traffic before it
 #      ever reaches the instance, regardless of guest firewall rules.
 #   3. Ensure our public key is in ubuntu's authorized_keys.
-#   4. Open the guest-level iptables firewall for HTTP (80) and HTTPS
-#      (443), persisted across reboots. OCI images ship a REJECT rule near
-#      the top of INPUT, so rules are PREPENDED (no position number) to
-#      evaluate first.
+#   4. Lock the guest-level iptables firewall so HTTP (80) and HTTPS (443)
+#      only accept Cloudflare's origin IP ranges (the VM is Cloudflare-proxied),
+#      persisted across reboots, with a weekly systemd timer refreshing the
+#      ranges. SSH (22) stays open. See lib/firewall.sh + cf-lock-iptables.sh.
 #   5. Install Docker Engine + the official compose plugin, and add
 #      `ubuntu` to the docker group.
 #   6. Create (if missing) and attach a 150GB Always Free-eligible block
@@ -39,6 +39,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$REPO_ROOT/lib/env.sh"
 source "$REPO_ROOT/lib/bw.sh"
+source "$REPO_ROOT/lib/firewall.sh"
 load_env "$REPO_ROOT"
 
 VM_USER="${VM_USER:-ubuntu}"
@@ -137,15 +138,7 @@ ssh_run "mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && 
   chmod 600 ~/.ssh/authorized_keys"
 echo "    ok"
 
-echo "==> Firewall: opening 80/443, persisting rules"
-ssh_run '
-  sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
-  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq netfilter-persistent iptables-persistent >/dev/null && \
-  sudo iptables -C INPUT -p tcp --dport 80  -m state --state NEW -j ACCEPT 2>/dev/null || sudo iptables -I INPUT -p tcp --dport 80  -m state --state NEW -j ACCEPT && \
-  sudo iptables -C INPUT -p tcp --dport 443 -m state --state NEW -j ACCEPT 2>/dev/null || sudo iptables -I INPUT -p tcp --dport 443 -m state --state NEW -j ACCEPT && \
-  sudo netfilter-persistent save
-'
-echo "    ok"
+apply_cloudflare_lock "$SCRIPT_DIR/cf-lock-iptables.sh"
 
 echo "==> Docker: installing engine + compose plugin"
 ssh_run '

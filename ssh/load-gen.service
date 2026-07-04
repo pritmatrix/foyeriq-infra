@@ -1,0 +1,21 @@
+[Unit]
+Description=Keep-alive load generator (~30% CPU + ~6GB RAM) — prevents Oracle reclaiming this Always Free A1 instance as idle
+After=network.target
+
+[Service]
+Type=simple
+# Oracle flags an Always Free instance as idle only if, over a 7-day window,
+# the 95th-percentile CPU, network, AND memory are ALL under 20% — so sustained
+# CPU alone is enough. The ~6GB memory hold (--vm) is an independent second
+# guardian in case the CPU stressor ever dies: on this 23GB box it lands at
+# ~28%, above the 20% threshold. --vm-keep --vm-hang keeps those pages resident
+# with negligible extra CPU (a brief rewrite every 60s). Network is deliberately
+# NOT generated: reaching 20% of the vNIC means ~800 Mbps sustained and would
+# risk the 10TB free egress cap, and the AND-logic means it's never needed.
+ExecStart=/usr/bin/stress-ng --cpu 4 --cpu-load 30 --vm 1 --vm-bytes 6G --vm-keep --vm-hang 60 --timeout 0 --metrics-brief
+Restart=always
+RestartSec=5
+Nice=19
+
+[Install]
+WantedBy=multi-user.target

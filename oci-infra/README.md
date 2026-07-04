@@ -75,9 +75,9 @@ All config (domains, role names, passwords, pgAdmin login) comes from the `arm-v
 
 Requires:
 - `DOMAIN` and `PGADMIN_DOMAIN` (from the vault, or overridden) to already have DNS A records pointing at the VM's IP.
-- The cert is requested via certbot's automated HTTP-01 (webroot) challenge against the default nginx site on port 80 — no manual DNS TXT records, no DNS provider API. `certbot.timer` renews it unattended; deploy hooks reload nginx and refresh + restart Postgres so both pick up the renewed cert.
+- The cert is requested via certbot's automated HTTP-01 (webroot) challenge against the default nginx site on port 80 — no manual DNS TXT records, no DNS provider API. `certbot.timer` renews it unattended; deploy hooks reload nginx and refresh + restart Postgres so both pick up the renewed cert. (Renewal keeps working under the Cloudflare origin lock below: the domains are Cloudflare-proxied, so Let's Encrypt's HTTP-01 request reaches port 80 *through* Cloudflare, whose ranges are allowlisted.)
 
-(The Security List — 80/443 only, nothing else — is ensured automatically via the OCI API at the start of the script; no manual OCI console step needed.)
+(Two firewall layers: the OCI **Security List** — the network-edge firewall — allows inbound 80/443 from anywhere and is ensured automatically via the OCI API at the start of the script, no manual console step. One layer deeper, the guest **iptables** narrows 80/443 to Cloudflare's ranges only — see [Security hardening](#security-hardening).)
 
 **How both share 443:** nginx's stream module runs in `ssl_preread` mode on 443 — it peeks at the SNI of an incoming TLS ClientHello *without* terminating TLS, then forwards the raw encrypted bytes on untouched:
 - SNI = `pgadmin.foyeriq.in` → an internal nginx vhost (`127.0.0.1:18443`) that actually terminates TLS and reverse-proxies to pgAdmin4 (docker, `127.0.0.1:5050`).
@@ -87,19 +87,20 @@ This works with both classic `sslmode=require` clients and, on libpq 17+, `sslne
 
 ### Security hardening
 
-443 is open to the entire internet, and because all traffic arrives at Postgres via the local nginx proxy, Postgres itself never sees real client IPs — a log-based fail2ban jail isn't viable here. The script compensates with:
+The VM is Cloudflare-proxied (`foyeriq.in` / `pgadmin.foyeriq.in`), and because all traffic arrives at Postgres via the local nginx proxy, Postgres itself never sees real client IPs — a log-based fail2ban jail isn't viable here. The script compensates with:
 
-- **Two separate Postgres roles.** `$PG_SUPERUSER` is a true superuser but has **no network `pg_hba` entry at all** — it can only log in locally (`sudo -u postgres psql` after SSHing in). `$APP_USER` is unprivileged (`CONNECT` + `USAGE`/`CREATE` on `public` only) and is the *only* role reachable over 443 — this is what external clients and pgAdmin4 should use.
-- **Per-source-IP connection rate limiting** on 443 at the firewall (iptables `hashlimit`, 20/min with a burst of 30) — throttles brute-force/scanning attempts before they even reach nginx.
+- **Origin locked to Cloudflare.** Inbound 80/443 only accept [Cloudflare's published IP ranges](https://www.cloudflare.com/ips-v4) — nobody can bypass Cloudflare's WAF/rate-limiting/DDoS protection by hitting the origin IP directly. A weekly systemd timer (`cf-lock-iptables.timer`) refreshes the ranges. SSH (22) stays open. See [`lib/firewall.sh`](../lib/firewall.sh) + [`cf-lock-iptables.sh`](cf-lock-iptables.sh), or (re)apply standalone with [`cloudflare-lock.sh`](cloudflare-lock.sh). **Side effect:** Postgres is no longer reachable on 443 from arbitrary clients — use an SSH tunnel (below). Rate-limiting is Cloudflare's job now, so the old per-source-IP `hashlimit` on 443 is removed (behind Cloudflare, "source IP" is a shared edge, so it would throttle real users).
+- **Two separate Postgres roles.** `$PG_SUPERUSER` is a true superuser but has **no network `pg_hba` entry at all** — it can only log in locally (`sudo -u postgres psql` after SSHing in). `$APP_USER` is unprivileged (`CONNECT` + `USAGE`/`CREATE` on `public` only) and is the *only* role reachable over the wire — this is what pgAdmin4 and tunneled clients should use.
 - **Timeouts**: `statement_timeout` and `idle_in_transaction_session_timeout` both set to 5 minutes, bounding the damage a stuck or malicious connection can do.
 - **Connection logging**: `log_connections`/`log_disconnections` on.
 - **TLS 1.2+ only** (both nginx and Postgres — `ssl_protocols`/`ssl_min_protocol_version`).
 - **Unattended security upgrades** for OS packages and PGDG Postgres packages (reboots are not automatic).
 
-Connect to Postgres from anywhere with the unprivileged app role:
+Connect to Postgres with the unprivileged app role over an SSH tunnel (443 no longer carries Postgres to the outside world — the origin only accepts Cloudflare, which doesn't proxy the Postgres protocol):
 
 ```bash
-psql "host=$DOMAIN port=443 dbname=postgres user=$APP_USER sslmode=require"
+./ssh/connect.sh -L 5432:127.0.0.1:5432        # keep this session open
+psql "host=127.0.0.1 port=5432 dbname=postgres user=$APP_USER sslmode=require"
 ```
 
 For true superuser/admin work, SSH in first — the superuser role can't be reached remotely:
