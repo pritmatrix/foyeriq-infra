@@ -1,0 +1,6 @@
+# This repo is bash scripts + shell-sourced config. They MUST have LF endings,
+# even on Windows checkouts (core.autocrlf=true would otherwise produce CRLF and
+# break them — a CRLF blank line in .env, or a \r in a script, fails at runtime).
+* text=auto eol=lf
+*.sh text eol=lf
+.env.example text eol=lf

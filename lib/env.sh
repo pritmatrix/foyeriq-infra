@@ -12,6 +12,7 @@ load_env() {
   [[ -f "$env_file" ]] || return 0
   local line key value
   while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"   # tolerate CRLF (.env created/edited on Windows)
     [[ -z "$line" || "$line" == \#* ]] && continue
     key="${line%%=*}"
     value="${line#*=}"

@@ -54,7 +54,12 @@
 #                           `sudo -u postgres psql` (or `psql -U $PG_SUPERUSER` as the postgres
 #                           OS user) for true admin work.
 #   APP_USER                Unprivileged Postgres role for everyday access — this is what
-#                           external clients, apps, and pgAdmin4 "Add Server" should use
+#                           external clients, apps, and pgAdmin4 "Add Server" should use.
+#                           Set this to "foyeriq" — it owns the app databases below.
+#   APP_DB_MARKETING        Database for the FoyerIQ marketing site (default foyeriq_marketing).
+#   APP_DB_APP              Database for the FoyerIQ App APIs backend (default foyeriq_app).
+#                           Both are non-secret (from .env, see below); each is owned by
+#                           APP_USER and locked so only that role can connect/create.
 #
 # The instance's public IP and the cloud-level Security List (TCP 80/443
 # ingress) are discovered/ensured via the OCI API, same as setup.sh — this
@@ -64,9 +69,9 @@
 # (`export BW_SESSION=$(bw unlock --raw)`), plus the OCI CLI and jq
 # (`brew install oci-cli jq`).
 #
-# Non-secret config (instance OCID, Bitwarden item names) comes from .env
-# at the repo root — see .env.example — falling back to the defaults below
-# if .env is absent.
+# Non-secret config (instance OCID, Bitwarden item names, APP_DB_MARKETING,
+# APP_DB_APP) comes from .env at the repo root — see .env.example — falling
+# back to the defaults below if .env is absent.
 #
 # Safe to re-run.
 set -euo pipefail
@@ -84,6 +89,12 @@ BW_ITEM_SSH_KEY="${BW_ITEM_SSH_KEY:-arm-vm-ssh-key}"
 BW_ITEM_OCI_KEY="${BW_ITEM_OCI_KEY:-arm-vm-oci-api-key}"
 BW_ITEM_POSTGRES="${BW_ITEM_POSTGRES:-arm-vm-postgres}"
 REQUIRED_INGRESS_TCP_PORTS=(80 443)
+
+# Application databases owned by the unprivileged app role ($APP_USER).
+# Non-secret — pulled from .env via load_env above, or these defaults.
+# One per FoyerIQ app: the public marketing site, and the App APIs backend.
+APP_DB_MARKETING="${APP_DB_MARKETING:-foyeriq_marketing}"
+APP_DB_APP="${APP_DB_APP:-foyeriq_app}"
 
 if ! command -v oci >/dev/null; then
   echo "OCI CLI not found. Install it (e.g. 'brew install oci-cli') first." >&2
@@ -297,6 +308,36 @@ ssh_run "sudo -u postgres psql -v ON_ERROR_STOP=1 -c \"
 \""
 echo "    ok"
 
+echo "==> Provisioning application databases ($APP_DB_MARKETING, $APP_DB_APP), each owned by $APP_USER"
+# One database per app (marketing site, App APIs). Owned by the unprivileged
+# app role — never the superuser — so the app connects as a non-superuser.
+# Each is locked down: PUBLIC can't connect or create objects; only the app
+# role can. Idempotent (Postgres has no CREATE DATABASE IF NOT EXISTS, so we
+# gate on pg_database).
+ssh_run "
+  set -e
+  for db in $APP_DB_MARKETING $APP_DB_APP; do
+    if [[ \"\$(sudo -u postgres psql -tAc \"SELECT 1 FROM pg_database WHERE datname = '\$db'\")\" == '1' ]]; then
+      echo \"    already exists: \$db (ensuring owner = $APP_USER)\"
+      sudo -u postgres psql -v ON_ERROR_STOP=1 -c \"ALTER DATABASE \\\"\$db\\\" OWNER TO \\\"$APP_USER\\\";\"
+    else
+      echo \"    creating \$db (owner = $APP_USER)\"
+      sudo -u postgres createdb -O \"$APP_USER\" \"\$db\"
+    fi
+    # Least privilege: revoke the implicit PUBLIC grants, hand connect + full
+    # rights on the public schema to the app role only. Its own migrations
+    # create whatever schemas/tables they need (e.g. the site's 'marketing').
+    sudo -u postgres psql -v ON_ERROR_STOP=1 -d \"\$db\" -c \"
+      REVOKE ALL ON DATABASE \\\"\$db\\\" FROM PUBLIC;
+      REVOKE ALL ON SCHEMA public FROM PUBLIC;
+      GRANT CONNECT, TEMPORARY ON DATABASE \\\"\$db\\\" TO \\\"$APP_USER\\\";
+      ALTER SCHEMA public OWNER TO \\\"$APP_USER\\\";
+      GRANT ALL ON SCHEMA public TO \\\"$APP_USER\\\";
+    \"
+  done
+"
+echo "    ok"
+
 echo "==> Removing any 5432 / stale 8443 firewall rules from older versions of this script"
 ssh_run '
   sudo iptables -D INPUT -p tcp --dport 5432 -m state --state NEW -j ACCEPT 2>/dev/null || true
@@ -342,12 +383,19 @@ ssh_run '
   fi
 '
 
-echo "==> Starting pgAdmin4 (docker, bound to localhost:5050 only)"
+echo "==> Starting pgAdmin4 (docker, host network, bound to 127.0.0.1:5050 only)"
+# Host networking (not a bridged -p mapping) so pgAdmin's 127.0.0.1 IS the VM's
+# 127.0.0.1 — otherwise it can't reach Postgres, which listens on the host's
+# localhost only (a bridged container's 127.0.0.1 is its own, unreachable to PG).
+# PGADMIN_LISTEN_ADDRESS/PORT keep the UI private on 127.0.0.1:5050, exactly
+# where the internal nginx vhost proxies — so the public surface is unchanged.
 ssh_run "
   sudo docker rm -f pgadmin4 >/dev/null 2>&1 || true
   sudo docker volume create pgadmin4-data >/dev/null
   sudo docker run -d --name pgadmin4 --restart unless-stopped \
-    -p 127.0.0.1:5050:80 \
+    --network host \
+    -e PGADMIN_LISTEN_ADDRESS=127.0.0.1 \
+    -e PGADMIN_LISTEN_PORT=5050 \
     -e PGADMIN_DEFAULT_EMAIL='$PGADMIN_WEB_EMAIL' \
     -e PGADMIN_DEFAULT_PASSWORD='$PGADMIN_WEB_PASSWORD' \
     -v pgadmin4-data:/var/lib/pgadmin \
@@ -419,7 +467,13 @@ echo "==> Done. The origin's web ports (80/443) now accept Cloudflare ranges onl
 echo "    so Postgres is no longer reachable on 443 directly. Connect via an SSH tunnel"
 echo "    with the unprivileged app role:"
 echo "    ../ssh/connect.sh -L 5432:127.0.0.1:5432"
-echo "    psql \"host=127.0.0.1 port=5432 dbname=postgres user=$APP_USER sslmode=require\""
+echo "    psql \"host=127.0.0.1 port=5432 dbname=$APP_DB_MARKETING user=$APP_USER sslmode=require\""
+echo
+echo "==> Application databases (owned by $APP_USER):"
+echo "    $APP_DB_MARKETING   — FoyerIQ marketing site (schema 'marketing' + forms tables)"
+echo "    $APP_DB_APP   — FoyerIQ App APIs backend"
+echo "    App DATABASE_URL example:"
+echo "    postgresql://$APP_USER:<password>@127.0.0.1:5432/$APP_DB_MARKETING?sslmode=require"
 echo
 echo "==> For true superuser/admin work:"
 echo "    ../ssh/connect.sh"

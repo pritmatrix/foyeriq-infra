@@ -39,8 +39,11 @@ bw_notes() {
   bw get item "$1" --session "$BW_SESSION" | jq -r '.notes'
 }
 
-# bw_write_secret_file <item-name> <dest-path> -- writes notes to dest-path, chmod 600
+# bw_write_secret_file <item-name> <dest-path> -- writes notes to dest-path, chmod 600.
+# Strips CR so keys stored/edited on Windows (CRLF) aren't rejected by
+# OpenSSH/openssl ("error in libcrypto" / "invalid format"). PEM/OpenSSH key
+# material is pure ASCII with LF newlines, so dropping CR is always safe.
 bw_write_secret_file() {
-  bw_notes "$1" > "$2"
+  bw_notes "$1" | tr -d '\r' > "$2"
   chmod 600 "$2"
 }

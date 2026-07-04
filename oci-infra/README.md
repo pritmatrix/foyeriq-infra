@@ -53,6 +53,7 @@ cp .env.example .env
 | `VM_USER`, `VM_IP` | all scripts | SSH target. `VM_IP` here is only a fallback for `ssh/connect.sh` and `ssh/load-gen.sh` (no OCI API call) — the `oci-infra` scripts discover the current IP fresh via the API and ignore this unless you also export `VM_IP` yourself. |
 | `INSTANCE_ID`, `AVAILABILITY_DOMAIN` | `setup.sh`, `setup-postgres.sh` | The arm-vm instance's OCID and AD. |
 | `DATA_VOLUME_NAME`, `DATA_VOLUME_SIZE_GB`, `DATA_MOUNT_POINT` | `setup.sh` | Block volume settings (see Block storage below). |
+| `APP_DB_MARKETING`, `APP_DB_APP` | `setup-postgres.sh` | Names of the two application databases created, owned by the app role (defaults `foyeriq_marketing`, `foyeriq_app`). |
 | `BW_ITEM_SSH_KEY`, `BW_ITEM_OCI_KEY`, `BW_ITEM_POSTGRES` | all scripts | Bitwarden item names, in case you rename them in your vault. |
 
 `lib/env.sh`'s `load_env` only fills in vars that aren't already set in the environment, so ad-hoc overrides (`VM_IP=1.2.3.4 ./ssh/connect.sh`) still take precedence over `.env`. Every var above has a hardcoded fallback matching the current values, so scripts keep working even with no `.env` present at all.
@@ -90,7 +91,8 @@ This works with both classic `sslmode=require` clients and, on libpq 17+, `sslne
 The VM is Cloudflare-proxied (`foyeriq.in` / `pgadmin.foyeriq.in`), and because all traffic arrives at Postgres via the local nginx proxy, Postgres itself never sees real client IPs — a log-based fail2ban jail isn't viable here. The script compensates with:
 
 - **Origin locked to Cloudflare.** Inbound 80/443 only accept [Cloudflare's published IP ranges](https://www.cloudflare.com/ips-v4) — nobody can bypass Cloudflare's WAF/rate-limiting/DDoS protection by hitting the origin IP directly. A weekly systemd timer (`cf-lock-iptables.timer`) refreshes the ranges. SSH (22) stays open. See [`lib/firewall.sh`](../lib/firewall.sh) + [`cf-lock-iptables.sh`](cf-lock-iptables.sh), or (re)apply standalone with [`cloudflare-lock.sh`](cloudflare-lock.sh). **Side effect:** Postgres is no longer reachable on 443 from arbitrary clients — use an SSH tunnel (below). Rate-limiting is Cloudflare's job now, so the old per-source-IP `hashlimit` on 443 is removed (behind Cloudflare, "source IP" is a shared edge, so it would throttle real users).
-- **Two separate Postgres roles.** `$PG_SUPERUSER` is a true superuser but has **no network `pg_hba` entry at all** — it can only log in locally (`sudo -u postgres psql` after SSHing in). `$APP_USER` is unprivileged (`CONNECT` + `USAGE`/`CREATE` on `public` only) and is the *only* role reachable over the wire — this is what pgAdmin4 and tunneled clients should use.
+- **Two separate Postgres roles.** `$PG_SUPERUSER` is a true superuser but has **no network `pg_hba` entry at all** — it can only log in locally (`sudo -u postgres psql` after SSHing in). `$APP_USER` (`foyeriq`) is unprivileged and is the *only* role reachable over the wire — this is what pgAdmin4 and tunneled clients should use.
+- **Two application databases, owned by the app role.** `setup-postgres.sh` creates `$APP_DB_MARKETING` (`foyeriq_marketing`, the marketing site) and `$APP_DB_APP` (`foyeriq_app`, the App APIs), each owned by `foyeriq`. Each is locked down — the implicit `PUBLIC` grants on the database and `public` schema are revoked, so only `foyeriq` can connect or create objects. Each app's own migrations create whatever schemas/tables they need (e.g. the site's `marketing` schema). Idempotent and safe to re-run.
 - **Timeouts**: `statement_timeout` and `idle_in_transaction_session_timeout` both set to 5 minutes, bounding the damage a stuck or malicious connection can do.
 - **Connection logging**: `log_connections`/`log_disconnections` on.
 - **TLS 1.2+ only** (both nginx and Postgres — `ssl_protocols`/`ssl_min_protocol_version`).
@@ -100,7 +102,8 @@ Connect to Postgres with the unprivileged app role over an SSH tunnel (443 no lo
 
 ```bash
 ./ssh/connect.sh -L 5432:127.0.0.1:5432        # keep this session open
-psql "host=127.0.0.1 port=5432 dbname=postgres user=$APP_USER sslmode=require"
+psql "host=127.0.0.1 port=5432 dbname=foyeriq_marketing user=foyeriq sslmode=require"
+# ...or dbname=foyeriq_app for the App APIs backend.
 ```
 
 For true superuser/admin work, SSH in first — the superuser role can't be reached remotely:
