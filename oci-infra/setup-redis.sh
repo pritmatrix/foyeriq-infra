@@ -235,6 +235,23 @@ printf '%s' "$REDIS_PASSWORD" | ssh_run "
   sudo grep -qxF 'include /etc/redis/foyeriq.conf' /etc/redis/redis.conf || \
     echo 'include /etc/redis/foyeriq.conf' | sudo tee -a /etc/redis/redis.conf >/dev/null
 
+  # The packaged redis-server.service unit sandboxes the filesystem to
+  # read-only (ReadOnlyDirectories=/) except an allowlist that only covers
+  # its stock locations (/var/lib/redis, /var/log/redis, /run/redis,
+  # /etc/redis) -- it has no idea we relocated 'dir' onto the data volume.
+  # Without this override, systemd (not a Unix permission problem -- the
+  # directory is correctly owned 750 redis:redis) blocks Redis from writing
+  # its AOF/RDB files there, and the service fails immediately on every
+  # systemd-managed start while a manual, unsandboxed 'redis-server ...' run
+  # works fine -- that mismatch is the tell if this ever regresses.
+  sudo mkdir -p /etc/systemd/system/redis-server.service.d
+  {
+    echo '[Service]'
+    echo 'ReadWritePaths=$DATA_MOUNT_POINT/redis'
+  } | sudo tee /etc/systemd/system/redis-server.service.d/data-dir.conf >/dev/null
+  sudo systemctl daemon-reload
+  sudo systemctl reset-failed redis-server >/dev/null 2>&1 || true
+
   sudo systemctl enable redis-server >/dev/null
   sudo systemctl restart redis-server
   for i in \$(seq 1 15); do
