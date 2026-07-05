@@ -8,7 +8,7 @@ No secrets live in this repo or on disk — the SSH key, OCI API signing key, an
 
 | Path | What it's for |
 |---|---|
-| [`oci-infra/`](oci-infra/README.md) | Post-provision setup for the VM: base config ([`setup.sh`](oci-infra/setup.sh)), PostgreSQL + pgAdmin4 on 443 ([`setup-postgres.sh`](oci-infra/setup-postgres.sh)), the marketing site ([`deploy-site.sh`](oci-infra/deploy-site.sh)), and the Cloudflare origin lock ([`cloudflare-lock.sh`](oci-infra/cloudflare-lock.sh) / [`cf-lock-iptables.sh`](oci-infra/cf-lock-iptables.sh)). Start here for anything about the running server. |
+| [`oci-infra/`](oci-infra/README.md) | Post-provision setup for the VM: base config ([`setup.sh`](oci-infra/setup.sh)), PostgreSQL + pgAdmin4 on 443 ([`setup-postgres.sh`](oci-infra/setup-postgres.sh)), Redis + Redis Insight ([`setup-redis.sh`](oci-infra/setup-redis.sh)), the marketing site ([`deploy-site.sh`](oci-infra/deploy-site.sh)), the API ([`deploy-api.sh`](oci-infra/deploy-api.sh)), and the Cloudflare origin lock ([`cloudflare-lock.sh`](oci-infra/cloudflare-lock.sh) / [`cf-lock-iptables.sh`](oci-infra/cf-lock-iptables.sh)). Start here for anything about the running server. |
 | [`ssh/`](ssh/README.md) | Day-to-day access: [`connect.sh`](ssh/connect.sh) to get a shell (or run a remote command), and [`load-gen.sh`](ssh/load-gen.sh) to manage the keep-alive load service (~30% CPU + ~6 GB RAM, so Oracle doesn't reclaim the idle Always Free VM). |
 | [`lib/`](lib/) | Shared bash helpers sourced by the scripts: [`bw.sh`](lib/bw.sh) (Bitwarden vault), [`env.sh`](lib/env.sh) (loads `.env`), [`firewall.sh`](lib/firewall.sh) (deploys the Cloudflare lock). Source these, don't run them. |
 | [`share-oci-vm/`](share-oci-vm/README.md) | **Standalone, unrelated bundle** — a generic, shareable walk-through + provisioner for getting *your own* free OCI ARM VM from scratch. Not part of the arm-vm setup above; deliberately leaves 80/443 open to the world. |
@@ -36,7 +36,7 @@ export BW_SESSION=$(bw unlock --raw)   # once per shell/session — tokens don't
 
 ## Secrets
 
-All secrets come from a Bitwarden vault, never from local files or plaintext env vars on the command line. [`lib/bw.sh`](lib/bw.sh) fetches them at runtime into private temp files that are shredded when each script exits. Three vault items (names configurable via `.env`):
+All secrets come from a Bitwarden vault, never from local files or plaintext env vars on the command line. [`lib/bw.sh`](lib/bw.sh) fetches them at runtime into private temp files that are shredded when each script exits. Vault items (names configurable via `.env`):
 
 | Item | Contents |
 |---|---|
@@ -44,6 +44,7 @@ All secrets come from a Bitwarden vault, never from local files or plaintext env
 | `arm-vm-oci-api-key` | notes = OCI API private key (PEM); fields `user_ocid`, `fingerprint`, `tenancy_ocid`, `region` |
 | `arm-vm-postgres` | fields `domain`, `pgadmin_domain`, `pg_superuser(_password)`, `app_user(_password)`, `pgadmin_web_email/password` |
 | `arm-vm-redis` | fields `redisinsight_domain`, `redis_password`, `redisinsight_web_user/password`, `letsencrypt_email` |
+| `arm-vm-bws` (optional) | fields `access_token`, `project_id` — Bitwarden Secrets Manager bootstrap creds used by `deploy-api.sh` |
 
 Any field can be bypassed with the matching env var (`SSH_KEY=`, `OCI_CLI_USER=`/`OCI_CLI_KEY_FILE=`/…, `DOMAIN=`, `PG_SUPERUSER_PASSWORD=`, …) if Bitwarden is unavailable — the scripts only touch the vault for whatever wasn't already supplied. Details in [oci-infra/README.md § Secrets](oci-infra/README.md#secrets).
 
@@ -77,6 +78,12 @@ cp .env.example .env      # then edit
 bash ./oci-infra/setup-redis.sh
 # Windows PowerShell:
 # & "C:\Program Files\Git\bin\bash.exe" ./oci-infra/setup-redis.sh
+
+# Deploy/redeploy the API (api.foyeriq.in) — builds the Docker image on the VM
+# from a clean ../foyeriq-apis checkout, runs migrations, fetches its secrets
+# (JWT/MSG91/WhatsApp/Razorpay/ngrok) from Bitwarden Secrets Manager via the
+# bws CLI, and adds it to the same 443 SNI dispatch as everything else
+BWS_ACCESS_TOKEN=... ./oci-infra/deploy-api.sh   # BWS_ACCESS_TOKEN only needed once if not in the arm-vm-bws vault item
 
 # (Re)apply just the Cloudflare origin lock on 80/443
 ./oci-infra/cloudflare-lock.sh

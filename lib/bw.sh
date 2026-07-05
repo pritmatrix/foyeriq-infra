@@ -22,6 +22,9 @@
 #   arm-vm-redis         fields redisinsight_domain, redis_password,
 #                        redisinsight_web_user, redisinsight_web_password,
 #                        letsencrypt_email
+#   arm-vm-bws           (optional) fields access_token, project_id — bws
+#                        CLI bootstrap creds for deploy-api.sh; falls back to
+#                        BWS_ACCESS_TOKEN/BWS_PROJECT_ID env vars if absent
 
 bw_require_session() {
   command -v bw >/dev/null || { echo "Bitwarden CLI (bw) not found. Install it: brew install bitwarden-cli" >&2; exit 1; }
