@@ -8,7 +8,7 @@ No secrets live in this repo or on disk — the SSH key, OCI API signing key, an
 
 | Path | What it's for |
 |---|---|
-| [`oci-infra/`](oci-infra/README.md) | Post-provision setup for the VM: base config ([`setup.sh`](oci-infra/setup.sh)), PostgreSQL + pgAdmin4 on 443 ([`setup-postgres.sh`](oci-infra/setup-postgres.sh)), Redis + Redis Insight ([`setup-redis.sh`](oci-infra/setup-redis.sh)), the marketing site ([`deploy-site.sh`](oci-infra/deploy-site.sh)), the API ([`deploy-api.sh`](oci-infra/deploy-api.sh)), and the Cloudflare origin lock ([`cloudflare-lock.sh`](oci-infra/cloudflare-lock.sh) / [`cf-lock-iptables.sh`](oci-infra/cf-lock-iptables.sh)). Start here for anything about the running server. |
+| [`oci-infra/`](oci-infra/README.md) | Post-provision setup for the VM: base config ([`setup.sh`](oci-infra/setup.sh)), PostgreSQL + pgAdmin4 on 443 ([`setup-postgres.sh`](oci-infra/setup-postgres.sh)), Redis + Redis Insight ([`setup-redis.sh`](oci-infra/setup-redis.sh)), the marketing site ([`deploy-site.sh`](oci-infra/deploy-site.sh)), the API ([`deploy-api.sh`](oci-infra/deploy-api.sh)), the admin console ([`deploy-admin.sh`](oci-infra/deploy-admin.sh)), the secretary/society console ([`deploy-secretary.sh`](oci-infra/deploy-secretary.sh)), and the Cloudflare origin lock ([`cloudflare-lock.sh`](oci-infra/cloudflare-lock.sh) / [`cf-lock-iptables.sh`](oci-infra/cf-lock-iptables.sh)). Start here for anything about the running server. |
 | [`ssh/`](ssh/README.md) | Day-to-day access: [`connect.sh`](ssh/connect.sh) to get a shell (or run a remote command), and [`load-gen.sh`](ssh/load-gen.sh) to manage the keep-alive load service (~30% CPU + ~6 GB RAM, so Oracle doesn't reclaim the idle Always Free VM). |
 | [`lib/`](lib/) | Shared bash helpers sourced by the scripts: [`bw.sh`](lib/bw.sh) (Bitwarden vault), [`env.sh`](lib/env.sh) (loads `.env`), [`firewall.sh`](lib/firewall.sh) (deploys the Cloudflare lock). Source these, don't run them. |
 | [`share-oci-vm/`](share-oci-vm/README.md) | **Standalone, unrelated bundle** — a generic, shareable walk-through + provisioner for getting *your own* free OCI ARM VM from scratch. Not part of the arm-vm setup above; deliberately leaves 80/443 open to the world. |
@@ -84,6 +84,19 @@ bash ./oci-infra/setup-redis.sh
 # (JWT/MSG91/WhatsApp/Razorpay/ngrok) from Bitwarden Secrets Manager via the
 # bws CLI, and adds it to the same 443 SNI dispatch as everything else
 BWS_ACCESS_TOKEN=... ./oci-infra/deploy-api.sh   # BWS_ACCESS_TOKEN only needed once if not in the arm-vm-bws vault item
+
+# Deploy/redeploy the admin console (admin.foyeriq.in) — a static Vite SPA
+# with no secrets/DB of its own; builds the Docker image (nginx serving the
+# built bundle) from a clean ../foyeriq-admin checkout, bakes in
+# VITE_API_BASE_URL=https://api.foyeriq.in/api/v1, and adds it to the same
+# 443 SNI dispatch as everything else
+./oci-infra/deploy-admin.sh
+
+# Deploy/redeploy the secretary/society console (community.foyeriq.in) — same
+# shape as deploy-admin.sh (static Vite SPA, no secrets/DB of its own), also
+# bakes in VITE_OTP_BYPASS_ENABLED/VITE_OTP_DEV_BYPASS_CODE to match the API's
+# own OTP_BYPASS_ENABLED default
+./oci-infra/deploy-secretary.sh
 
 # (Re)apply just the Cloudflare origin lock on 80/443
 ./oci-infra/cloudflare-lock.sh

@@ -82,6 +82,8 @@ API_REMOTE_DIR="${API_REMOTE_DIR:-/opt/foyeriq-api}"
 API_DOMAIN="${API_DOMAIN:-api.foyeriq.in}"
 API_PORT="${API_PORT:-4000}"
 API_VHOST_PORT="${API_VHOST_PORT:-18445}"
+ADMIN_DOMAIN="${ADMIN_DOMAIN:-admin.foyeriq.in}"
+SECRETARY_DOMAIN="${SECRETARY_DOMAIN:-community.foyeriq.in}"
 BWS_VERSION="${BWS_VERSION:-1.0.0}"
 # Real SMS/email providers (MSG91/Brevo/WhatsApp) aren't wired up yet, so OTP
 # login would otherwise be unreachable in production. Defaults to on; once a
@@ -199,7 +201,7 @@ NODE_ENV=production
 PORT=$API_PORT
 API_PREFIX=/api/v1
 APP_URL=https://$API_DOMAIN
-CORS_ORIGINS=https://foyeriq.in
+CORS_ORIGINS=https://foyeriq.in,https://$ADMIN_DOMAIN,https://$SECRETARY_DOMAIN
 DB_HOST=127.0.0.1
 DB_PORT=5432
 DB_NAME=foyeriq_app
