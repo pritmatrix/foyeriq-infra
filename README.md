@@ -8,9 +8,9 @@ No secrets live in this repo or on disk — the SSH key, OCI API signing key, an
 
 | Path | What it's for |
 |---|---|
-| [`oci-infra/`](oci-infra/README.md) | Post-provision setup for the VM: base config ([`setup.sh`](oci-infra/setup.sh)), PostgreSQL + pgAdmin4 on 443 ([`setup-postgres.sh`](oci-infra/setup-postgres.sh)), and the Cloudflare origin lock ([`cloudflare-lock.sh`](oci-infra/cloudflare-lock.sh) / [`cf-lock-iptables.sh`](oci-infra/cf-lock-iptables.sh)). Start here for anything about the running server. |
+| [`oci-infra/`](oci-infra/README.md) | Post-provision setup for the VM: base config ([`setup.sh`](oci-infra/setup.sh)), PostgreSQL + pgAdmin4 on 443 ([`setup-postgres.sh`](oci-infra/setup-postgres.sh)), the marketing site ([`deploy-site.sh`](oci-infra/deploy-site.sh)), and the Cloudflare origin lock ([`cloudflare-lock.sh`](oci-infra/cloudflare-lock.sh) / [`cf-lock-iptables.sh`](oci-infra/cf-lock-iptables.sh)). Start here for anything about the running server. |
 | [`ssh/`](ssh/README.md) | Day-to-day access: [`connect.sh`](ssh/connect.sh) to get a shell (or run a remote command), and [`load-gen.sh`](ssh/load-gen.sh) to manage the keep-alive load service (~30% CPU + ~6 GB RAM, so Oracle doesn't reclaim the idle Always Free VM). |
-| [`lib/`](lib/) | Shared bash helpers sourced by the scripts: [`bw.sh`](lib/bw.sh) (Bitwarden), [`env.sh`](lib/env.sh) (loads `.env`), [`firewall.sh`](lib/firewall.sh) (deploys the Cloudflare lock). Source these, don't run them. |
+| [`lib/`](lib/) | Shared bash helpers sourced by the scripts: [`bw.sh`](lib/bw.sh) (Bitwarden vault), [`env.sh`](lib/env.sh) (loads `.env`), [`firewall.sh`](lib/firewall.sh) (deploys the Cloudflare lock). Source these, don't run them. |
 | [`share-oci-vm/`](share-oci-vm/README.md) | **Standalone, unrelated bundle** — a generic, shareable walk-through + provisioner for getting *your own* free OCI ARM VM from scratch. Not part of the arm-vm setup above; deliberately leaves 80/443 open to the world. |
 | `.env` / [`.env.example`](.env.example) | Local, non-secret config (resource IDs, VM IP, Bitwarden item names). `.env` is gitignored; copy the example to get started. |
 
@@ -67,6 +67,11 @@ cp .env.example .env      # then edit
 
 # Install / reconfigure PostgreSQL + pgAdmin4 (both served on 443 via nginx SNI)
 ./oci-infra/setup-postgres.sh
+
+# Deploy/redeploy the marketing site (foyeriq.in) — builds the Docker image on
+# the VM from a clean ../foyeriq-site checkout, runs migrations, and adds it to
+# the same 443 SNI dispatch as Postgres/pgAdmin4
+./oci-infra/deploy-site.sh
 
 # Install / reconfigure loopback-only Redis + Redis Insight
 bash ./oci-infra/setup-redis.sh

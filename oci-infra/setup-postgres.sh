@@ -428,22 +428,35 @@ echo "==> Configuring nginx stream module: SNI dispatch on public 443"
 echo "    (nginx.conf only allows a 'stream' block at top level, not inside 'http', so it's wired in separately)"
 ssh_run '
   set -e
-  sudo mkdir -p /etc/nginx/stream.d
+  sudo mkdir -p /etc/nginx/stream.d/sni.d
   grep -q "include /etc/nginx/stream.d/\*.conf;" /etc/nginx/nginx.conf || \
     sudo sed -i "/^http {/i stream {\n    include /etc/nginx/stream.d/*.conf;\n}\n" /etc/nginx/nginx.conf
   sudo rm -f /etc/nginx/stream.d/postgres.conf
 '
-ssh_run "sudo tee /etc/nginx/stream.d/dispatch.conf >/dev/null <<CONF
-map \\\$ssl_preread_server_name \\\$backend {
-    $PGADMIN_DOMAIN     127.0.0.1:18443;
-    default             127.0.0.1:5432;
+echo "$PGADMIN_DOMAIN     127.0.0.1:18443;" | ssh_run "sudo tee /etc/nginx/stream.d/sni.d/pgadmin.conf >/dev/null"
+
+# Written unconditionally (not guarded by a file-existence check) so this
+# always self-heals to the same include-form dispatch.conf that
+# setup-redis.sh and deploy-site.sh also write byte-for-byte identically --
+# whichever of these scripts runs last wins, but since all three only ever
+# emit this same shared template (each managing its own snippet under
+# stream.d/sni.d/*.conf instead of the dispatch map itself), the result is
+# always correct regardless of run order.
+ssh_run '
+  set -e
+  sudo mkdir -p /etc/nginx/stream.d/sni.d
+  sudo tee /etc/nginx/stream.d/dispatch.conf >/dev/null <<'"'"'CONF'"'"'
+map $ssl_preread_server_name $backend {
+    include /etc/nginx/stream.d/sni.d/*.conf;
+    default 127.0.0.1:5432;
 }
 server {
     listen 443;
     ssl_preread on;
-    proxy_pass \\\$backend;
+    proxy_pass $backend;
 }
-CONF"
+CONF
+'
 
 ssh_run 'sudo nginx -t && sudo systemctl enable --now nginx && sudo systemctl reload nginx'
 echo "    ok"
